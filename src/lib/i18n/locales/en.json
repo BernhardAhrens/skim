@@ -51,6 +51,11 @@
   "onb.err_plaintext_port": "The server answered without encryption — this doesn't look like a TLS port. Most providers use IMAP port 993; some use 143.",
   "onb.err_oauth_cancelled": "Sign-in was cancelled.",
   "onb.err_admin_consent": "Your organization doesn't allow apps to sign in without an administrator's approval. Ask an admin to approve Skim, then try again.",
+  "secrets.full_title": "Windows can't store your password",
+  "secrets.full_body": "Skim keeps passwords in Windows Credential Manager, and it has no room left — that store is shared with every app on this PC. Open it, delete a few entries under Windows Credentials you no longer need, then try again.",
+  "secrets.unavailable_title": "Windows can't store your password",
+  "secrets.unavailable_body": "Windows Credential Manager, where Skim keeps passwords, didn't answer. Signing out of Windows and back in usually brings it back — then try again.",
+  "secrets.open_manager": "Open Credential Manager",
 
   "onb.footer": "Open source · Windows",
   "nav.compose": "Compose",

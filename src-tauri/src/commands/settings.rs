@@ -75,6 +75,17 @@ pub async fn set_setting(state: State<'_, AppState>, key: String, value: String)
         .await
 }
 
+/// The Windows Credential Manager can refuse a write — most often because its
+/// vault is full of other apps' entries. Take the user straight to the pane
+/// where they can clear it, rather than describing a path through Control Panel.
+#[tauri::command]
+pub fn open_credential_manager() -> Result<()> {
+    std::process::Command::new("control.exe")
+        .args(["/name", "Microsoft.CredentialManager"])
+        .spawn()?;
+    Ok(())
+}
+
 /// Longer than this and the line is a dump, not a diagnostic.
 const FRONTEND_LOG_MAX: usize = 2000;
 

@@ -2,7 +2,7 @@
   import { getVersion } from "@tauri-apps/api/app";
   import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
   import { openUrl } from "@tauri-apps/plugin-opener";
-  import { aiApi, aiStream, api, errorMessage } from "../../lib/api";
+  import { aiApi, aiStream, api, credentialStoreError, errorMessage } from "../../lib/api";
   import type { AiModel, AiProvider } from "../../lib/api";
   import { LOCALES, getLocale, setLocale, t, type Locale } from "../../lib/i18n/index.svelte";
   import { createOllamaDetection, ollamaV1 } from "../../lib/ollama-detect.svelte";
@@ -420,6 +420,15 @@
     await mail.setGroupThreads(value === "on");
   }
 
+  /** Saving a key can fail because Windows won't store it — say so plainly
+   *  instead of handing the user a Win32 code. */
+  function aiKeyError(e: unknown): string {
+    const store = credentialStoreError(e);
+    if (store === "full") return t("secrets.full_body");
+    if (store === "unavailable") return t("secrets.unavailable_body");
+    return errorMessage(e);
+  }
+
   async function saveAiKey() {
     aiBusy = true;
     aiError = "";
@@ -428,7 +437,7 @@
       aiKeyInput = "";
       await ai.refresh();
     } catch (e) {
-      aiError = errorMessage(e);
+      aiError = aiKeyError(e);
     } finally {
       aiBusy = false;
     }
@@ -453,7 +462,7 @@
       customKey = "";
       await ai.refresh();
     } catch (e) {
-      aiError = errorMessage(e);
+      aiError = aiKeyError(e);
     } finally {
       aiBusy = false;
     }

@@ -2,7 +2,14 @@
   // Email-first connect form, shared by onboarding (first mailbox) and
   // settings (adding another). Emits the connected account via `onconnected`.
   import { openUrl } from "@tauri-apps/plugin-opener";
-  import { api, errorMessage, errorCode, type AddAccountInput, type OauthAvailability } from "../../lib/api";
+  import {
+    api,
+    errorMessage,
+    errorCode,
+    credentialStoreError,
+    type AddAccountInput,
+    type OauthAvailability,
+  } from "../../lib/api";
   import { t } from "../../lib/i18n/index.svelte";
   import type { Account, ServerPreset } from "../../lib/types";
 
@@ -38,6 +45,11 @@
   // Set when Microsoft sign-in works but the Outlook mailbox has IMAP disabled;
   // shows a fix-it prompt with a link to the setting and a retry.
   let imapSetupNeeded = $state(false);
+  // Set when Windows refuses to store the credential — the sign-in itself worked,
+  // so the fix is in Credential Manager, not in anything the user typed here.
+  let credStore = $state<"full" | "unavailable" | null>(null);
+  // Which attempt hit that wall, so the panel's retry repeats it.
+  let retryAttempt: (() => Promise<void>) | null = null;
 
   // Deep link to Outlook.com's "Forwarding and IMAP" settings pane.
   const OUTLOOK_IMAP_SETTINGS_URL =
@@ -56,7 +68,9 @@
   /** A connect attempt failed — show the friendly text for known codes. */
   function showError(e: unknown) {
     const code = errorCode(e);
-    if (code === "account_exists") error = t("accounts.exists");
+    const store = credentialStoreError(e);
+    if (store) credStore = store;
+    else if (code === "account_exists") error = t("accounts.exists");
     else if (code === "oauth_cancelled") error = t("onb.err_oauth_cancelled");
     else if (code === "oauth_consent_blocked") error = t("onb.err_admin_consent");
     else if (code === "starttls_unsupported") error = t("onb.err_starttls_unsupported");
@@ -109,6 +123,8 @@
     busy = "google";
     error = "";
     imapSetupNeeded = false;
+    credStore = null;
+    retryAttempt = connectGoogle;
     try {
       const account = await api.startGoogleOauth();
       onconnected(account);
@@ -123,6 +139,8 @@
     busy = "microsoft";
     error = "";
     imapSetupNeeded = false;
+    credStore = null;
+    retryAttempt = connectMicrosoft;
     try {
       const account = await api.startMicrosoftOauth();
       onconnected(account);
@@ -158,6 +176,8 @@
     busy = "password";
     error = "";
     imapSetupNeeded = false;
+    credStore = null;
+    retryAttempt = () => connectPassword(ev);
     try {
       const input: AddAccountInput = {
         email: email.trim(),
@@ -243,6 +263,23 @@
       </button>
       <button type="button" class="linkish" onclick={connectMicrosoft} disabled={busy !== "none"}>
         {busy === "microsoft" ? t("onb.connecting") : t("onb.retry")}
+      </button>
+    </div>
+  </div>
+{/snippet}
+
+{#snippet credentialStorePanel()}
+  <div class="imap-setup">
+    <div class="imap-setup-title">
+      {credStore === "full" ? t("secrets.full_title") : t("secrets.unavailable_title")}
+    </div>
+    <p>{credStore === "full" ? t("secrets.full_body") : t("secrets.unavailable_body")}</p>
+    <div class="imap-setup-actions">
+      <button type="button" class="primary" onclick={() => void api.openCredentialManager()}>
+        {t("secrets.open_manager")} ↗
+      </button>
+      <button type="button" class="linkish" onclick={() => void retryAttempt?.()} disabled={busy !== "none"}>
+        {busy !== "none" ? t("onb.connecting") : t("onb.retry")}
       </button>
     </div>
   </div>
@@ -365,6 +402,12 @@
         {busy === "microsoft" ? t("onb.waiting_microsoft") : t("onb.work_account_microsoft")}
       </button>
     {/if}
+  {/if}
+
+  <!-- Windows itself refused to keep the credential: the fix is over in
+       Credential Manager, whichever sign-in method got us here. -->
+  {#if credStore}
+    {@render credentialStorePanel()}
   {/if}
 </form>
 

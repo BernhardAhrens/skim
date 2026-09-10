@@ -391,6 +391,7 @@ pub fn run() {
             commands::settings::get_settings,
             commands::settings::set_setting,
             commands::settings::log_frontend_error,
+            commands::settings::open_credential_manager,
             commands::settings::prepare_update,
         ])
         .run(tauri::generate_context!())

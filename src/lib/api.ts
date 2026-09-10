@@ -158,6 +158,8 @@ export const api = {
   getSettings: () => invoke<Record<string, string>>("get_settings"),
   setSetting: (key: string, value: string) => invoke<void>("set_setting", { key, value }),
   logFrontendError: (message: string) => invoke<void>("log_frontend_error", { message }),
+  /** Open the Windows Credential Manager pane (offered when it refuses a write). */
+  openCredentialManager: () => invoke<void>("open_credential_manager"),
   /** Park the sync engines and checkpoint the database before the updater
    *  hands over to the installer — which kills this process outright. */
   prepareUpdate: () => invoke<void>("prepare_update"),
@@ -186,6 +188,16 @@ export function errorMessage(e: unknown): string {
 export function errorCode(e: unknown): string {
   if (e && typeof e === "object" && "code" in e) return String(e.code);
   return "";
+}
+
+/** Windows refused to store the secret: which kind of refusal, or null if the
+ *  failure is something else. Both kinds are dead ends for the user until the
+ *  credential store is fixed, so they get their own explanation. */
+export function credentialStoreError(e: unknown): "full" | "unavailable" | null {
+  const code = errorCode(e);
+  if (code === "secrets_full") return "full";
+  if (code === "secrets_unavailable") return "unavailable";
+  return null;
 }
 
 // ---- AI (streaming over IPC channels) ----

@@ -404,7 +404,12 @@ async fn resolve_credentials(
         // so the account keeps working past the old token's lifetime.
         if let Some(new_rt) = refreshed.new_refresh_token {
             if new_rt != secret {
-                secrets::set(&secrets::mail_key(&account.id), &new_rt)?;
+                // A vault that refuses the write must not cost us this session:
+                // the access token in hand is valid, and failing here would throw
+                // away a rotation the provider has already made.
+                if let Err(e) = secrets::set(&secrets::mail_key(&account.id), &new_rt) {
+                    tracing::warn!(error = %e, "cannot store the rotated refresh token");
+                }
             }
         }
         *oauth_cache = Some((refreshed.access_token.clone(), refreshed.expires_at));

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { getVersion } from "@tauri-apps/api/app";
   import { openUrl } from "@tauri-apps/plugin-opener";
-  import { aiApi, api, errorMessage, type AiProvider } from "../../lib/api";
+  import { aiApi, api, credentialStoreError, errorMessage, type AiProvider } from "../../lib/api";
   import { getLocale, LOCALES, setLocale, t, type Locale } from "../../lib/i18n/index.svelte";
   import { createOllamaDetection, ollamaV1 } from "../../lib/ollama-detect.svelte";
   import { mail } from "../../lib/stores/mail.svelte";
@@ -53,6 +53,15 @@
     aiProvider === "custom" ? !!customBaseUrl.trim() && !!customModel.trim() : !!aiKey.trim(),
   );
 
+  /** Saving a key can fail because Windows won't store it — say so plainly
+   *  instead of handing the user a Win32 code. */
+  function aiKeyError(e: unknown): string {
+    const store = credentialStoreError(e);
+    if (store === "full") return t("secrets.full_body");
+    if (store === "unavailable") return t("secrets.unavailable_body");
+    return errorMessage(e);
+  }
+
   async function enableAi() {
     aiBusy = true;
     aiError = "";
@@ -65,7 +74,7 @@
       aiVerified = true;
       setTimeout(() => finish(), 400);
     } catch (e) {
-      aiError = errorMessage(e);
+      aiError = aiKeyError(e);
     } finally {
       aiBusy = false;
     }
