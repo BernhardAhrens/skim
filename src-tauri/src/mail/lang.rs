@@ -5,11 +5,11 @@
 //! must never cost a network round-trip and never be worth caching.
 //!
 //! Silence is the safe answer: a body that is too short, too noisy, or simply
-//! ambiguous returns `None` and the pane offers nothing.
+//! ambiguous offers nothing.
 
 use crate::mail::parse::{strip_css, strip_quoted};
 use std::sync::OnceLock;
-use whatlang::{Detector, Lang};
+use whatlang::{Detector, Lang, Script};
 
 /// Taken off the front of the body before any other work, so a 500 KB
 /// newsletter isn't split into lines and rejoined on every open.
@@ -32,6 +32,11 @@ const ALLOWED: &[Lang] = &[
     Lang::Eng,
     Lang::Rus,
     Lang::Srp,
+    // whatlang files Serbian under Cyrillic only; the Latin spelling of the
+    // very same language — and of Bosnian and Croatian — scores as `Hrv`.
+    // Without it here, Latin-script Serbian has no right answer to win with,
+    // its neighbours split the vote, and the pane stays silent.
+    Lang::Hrv,
     Lang::Fra,
     Lang::Deu,
     Lang::Spa,
@@ -56,8 +61,33 @@ fn detector() -> &'static Detector {
     DETECTOR.get_or_init(|| Detector::with_allowlist(ALLOWED.to_vec()))
 }
 
-/// The body's language as an ISO 639-1 code, or `None` when unsure.
-pub fn detect(body_text: &str) -> Option<String> {
+/// What can be said about a body: the language, when the guess is solid, or
+/// else the writing system alone — which is still worth something.
+enum Detected {
+    Lang(&'static str),
+    Script(Script),
+}
+
+/// Is this body in a language the reader can't read? The one question the
+/// reading pane actually has: `locale` is the language of their UI.
+pub fn is_foreign(body_text: &str, locale: &str) -> bool {
+    // Detection speaks bare ISO 639-1; the setting normally does too, but
+    // compare primary subtags so an "en-US" still matches English.
+    let own = locale.split(['-', '_']).next().unwrap_or(locale);
+    match detect(body_text) {
+        Some(Detected::Lang(code)) => code != own,
+        // Too close to call: the language is outside the list above, or two
+        // neighbours split the vote. The script is still solid, and someone
+        // whose own language isn't written in it can't read this mail whichever
+        // of the candidates it turns out to be.
+        Some(Detected::Script(script)) => !writes(own, script),
+        None => false,
+    }
+}
+
+/// The body's language, or the script it is written in when the language is
+/// too close to call. `None` when even the script says nothing.
+fn detect(body_text: &str) -> Option<Detected> {
     let head: String = body_text.chars().take(HEAD_CHARS).collect();
     // Some senders' text part is their HTML with the tags taken out, `<style>`
     // included, so the body opens with a stylesheet. Braces and property names
@@ -78,10 +108,35 @@ pub fn detect(body_text: &str) -> Option<String> {
         return None;
     }
     let info = detector().detect(&sample)?;
-    if !info.is_reliable() {
-        return None;
+    Some(match iso1(info.lang()).filter(|_| info.is_reliable()) {
+        Some(code) => Detected::Lang(code),
+        None => Detected::Script(info.script()),
+    })
+}
+
+/// Is `lang` (ISO 639-1) written in `script`? Only asked when the language
+/// guess didn't hold, to find out whether the reader could have read it anyway.
+/// A locale we don't know answers yes: staying quiet beats a wrong offer.
+fn writes(lang: &str, script: Script) -> bool {
+    match lang {
+        "ru" | "uk" => script == Script::Cyrillic,
+        // Serbia reads both of its alphabets.
+        "sr" => matches!(script, Script::Cyrillic | Script::Latin),
+        // Kanji-only Japanese reads as Mandarin to a script detector.
+        "ja" => matches!(
+            script,
+            Script::Hiragana | Script::Katakana | Script::Mandarin
+        ),
+        "zh" => script == Script::Mandarin,
+        "ko" => script == Script::Hangul,
+        "ar" => script == Script::Arabic,
+        "he" => script == Script::Hebrew,
+        "hi" => script == Script::Devanagari,
+        "cs" | "de" | "en" | "es" | "fr" | "it" | "nl" | "pl" | "pt" | "sv" | "tr" => {
+            script == Script::Latin
+        }
+        _ => true,
     }
-    iso1(info.lang()).map(str::to_string)
 }
 
 /// Collapse whitespace, drop URLs and addresses (Latin noise that would pull a
@@ -115,7 +170,10 @@ fn iso1(lang: Lang) -> Option<&'static str> {
     Some(match lang {
         Lang::Eng => "en",
         Lang::Rus => "ru",
-        Lang::Srp => "sr",
+        // Latin-script BCS. Skim's own Serbian is the closest thing it speaks,
+        // and the guess only decides *whether* to offer — the language
+        // translated into always comes from the locale.
+        Lang::Srp | Lang::Hrv => "sr",
         Lang::Fra => "fr",
         Lang::Deu => "de",
         Lang::Spa => "es",
@@ -151,6 +209,20 @@ mod tests {
         "お問い合わせいただきありがとうございます。ご注文の商品は本日発送いたしました。\
         配送状況は追跡番号からご確認いただけます。到着までしばらくお待ちください。\
         今後ともよろしくお願いいたします。";
+    /// Serbian as half the country writes it: Latin letters, not Cyrillic.
+    const SR_LATIN: &str = "Poštovani, obaveštavamo vas da je vaša pošiljka stigla u naše \
+        skladište i da je možete preuzeti svakog radnog dana od osam do šesnaest časova. \
+        Molimo vas da ponesete ličnu kartu i broj porudžbine.";
+    /// A language deliberately outside `ALLOWED` — whatlang files it under a
+    /// neighbour (Spanish, as it happens) and is sure of it.
+    const HU: &str = "Tisztelt Ügyfelünk! Tájékoztatjuk, hogy a számlája elkészült és \
+        letölthető a fiókjából. Kérjük, a befizetést a hónap végéig rendezze, hogy a \
+        szolgáltatás megszakítás nélkül működjön tovább.";
+    /// The kind of body no trigram can name: several languages at once. This is
+    /// where the guess comes back unreliable and only the script is left.
+    const MIXED: &str = "Dear partner, prosimo za potrditev, molimo potvrdite, bitte \
+        bestätigen Sie den Termin, merci de confirmer le rendez-vous, grazie per la \
+        conferma, hvala unaprijed na odgovoru.";
 
     const EN: &str = "Hi there, check out this week's top candidate picks, chosen from the \
         preferences you saved earlier. Each profile below has a short introduction written by \
@@ -166,30 +238,39 @@ mod tests {
         border-radius:4px;color:#fff;display:inline-block;padding:12px 24px;\
         text-decoration:none}td{font-size:14px;line-height:20px}body{margin:0;padding:0}";
 
+    /// The language, when the guess was solid enough to name one.
+    fn code(text: &str) -> Option<&'static str> {
+        match detect(text) {
+            Some(Detected::Lang(code)) => Some(code),
+            _ => None,
+        }
+    }
+
     #[test]
     fn detects_the_language_under_a_flattened_stylesheet() {
         // The regression: 72% of the sample was CSS, whatlang called the guess
         // unreliable, and the pane offered no translation for plain English.
-        assert_eq!(detect(&format!("{CSS}{EN}")).as_deref(), Some("en"));
+        assert_eq!(code(&format!("{CSS}{EN}")), Some("en"));
     }
 
     #[test]
     fn a_stylesheet_is_not_a_language() {
-        assert_eq!(detect(CSS), None);
+        assert!(detect(CSS).is_none());
+        assert!(!is_foreign(CSS, "ru"));
     }
 
     #[test]
     fn css_does_not_outvote_the_prose() {
-        assert_eq!(detect(&format!("{CSS}{RU}")).as_deref(), Some("ru"));
+        assert_eq!(code(&format!("{CSS}{RU}")), Some("ru"));
     }
 
     #[test]
     fn maps_detections_to_iso_639_1() {
         // The guard: whatlang would say "rus"/"deu"/"jpn" here, and the locale
         // setting says "ru"/"de"/"ja".
-        assert_eq!(detect(RU).as_deref(), Some("ru"));
-        assert_eq!(detect(DE).as_deref(), Some("de"));
-        assert_eq!(detect(JA).as_deref(), Some("ja"));
+        assert_eq!(code(RU), Some("ru"));
+        assert_eq!(code(DE), Some("de"));
+        assert_eq!(code(JA), Some("ja"));
     }
 
     #[test]
@@ -201,15 +282,15 @@ mod tests {
 
     #[test]
     fn too_short_to_guess() {
-        assert_eq!(detect("Guten Tag, danke schön!"), None);
-        assert_eq!(detect(""), None);
+        assert!(detect("Guten Tag, danke schön!").is_none());
+        assert!(detect("").is_none());
     }
 
     #[test]
     fn links_and_numbers_alone_say_nothing() {
         let body = "https://example.com/a/b/c?utm_source=newsletter&utm_medium=email \
             no-reply@example.com 1234 5678 90 +49 30 123456 https://example.com/unsubscribe";
-        assert_eq!(detect(body), None);
+        assert!(detect(body).is_none());
     }
 
     #[test]
@@ -220,12 +301,53 @@ mod tests {
             "On Tue, Aug 4, 2026 at 10:00, Ann <ann@example.com> wrote:\n\
              > What is the status?\n\n{DE}"
         );
-        assert_eq!(detect(&body).as_deref(), Some("de"));
+        assert_eq!(code(&body), Some("de"));
     }
 
     #[test]
     fn prefers_the_senders_own_words_over_the_quoted_tail() {
         let body = format!("{DE}\n\nOn Tue, Aug 4, 2026, Ann wrote:\n> {RU}");
-        assert_eq!(detect(&body).as_deref(), Some("de"));
+        assert_eq!(code(&body), Some("de"));
+    }
+
+    #[test]
+    fn serbian_written_in_latin_is_still_serbian() {
+        // whatlang knows Serbian only in Cyrillic; without `Hrv` in the
+        // allowlist this body had no right answer and the pane stayed silent.
+        assert_eq!(code(SR_LATIN), Some("sr"));
+        assert!(is_foreign(SR_LATIN, "ru"));
+        assert!(!is_foreign(SR_LATIN, "sr"));
+    }
+
+    #[test]
+    fn a_language_outside_the_list_is_still_offered() {
+        // Hungarian gets misfiled as a neighbour, which costs nothing: the
+        // answer to "can this reader read it" is no either way.
+        assert!(is_foreign(HU, "ru"));
+        assert!(is_foreign(HU, "en"));
+    }
+
+    #[test]
+    fn a_script_the_reader_does_not_use_is_offered_anyway() {
+        // Nothing here is nameable, but a reader of Russian is no better off
+        // for that — while a reader of English might well cope.
+        assert!(is_foreign(MIXED, "ru"));
+        assert!(!is_foreign(MIXED, "en"));
+        assert!(is_foreign(EN, "ja"));
+    }
+
+    #[test]
+    fn the_readers_own_language_is_never_offered() {
+        assert!(!is_foreign(RU, "ru"));
+        assert!(!is_foreign(EN, "en-US"));
+        assert!(!is_foreign(DE, "de"));
+        assert!(!is_foreign(JA, "ja"));
+    }
+
+    #[test]
+    fn the_script_rule_stays_quiet_for_a_locale_it_does_not_know() {
+        // A named language still gets compared, but a script we can't place a
+        // locale in is no reason to guess on the reader's behalf.
+        assert!(!is_foreign(MIXED, "qq"));
     }
 }

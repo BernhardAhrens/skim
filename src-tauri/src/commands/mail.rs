@@ -376,18 +376,18 @@ pub async fn get_message_body(
         // Nothing stored yet: offer only for mail the user's own language can't
         // read. Detection is local and costs microseconds, so it runs per render
         // rather than being cached and invalidated.
-        None if !is_invite_card => text
-            .as_deref()
-            .and_then(lang::detect)
-            // Detection speaks bare ISO 639-1; the setting normally does too, but
-            // compare primary subtags so an "en-US" would still match English.
-            .filter(|detected| detected != locale.split(['-', '_']).next().unwrap_or(&locale))
-            .map(|_| TranslateState {
+        None if !is_invite_card
+            && text
+                .as_deref()
+                .is_some_and(|text| lang::is_foreign(text, &locale)) =>
+        {
+            Some(TranslateState {
                 showing: false,
                 subject: None,
                 cached: false,
                 truncated: false,
-            }),
+            })
+        }
         _ => None,
     };
 
