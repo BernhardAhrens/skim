@@ -232,6 +232,25 @@ pub fn list_folders(conn: &Connection, account_id: &str) -> rusqlite::Result<Vec
     Ok(rows)
 }
 
+/// The grouped folder list. Its `m2` subquery runs once per message in the
+/// folder, so it must seek `idx_messages_thread_folder` — see migration 0014
+/// and `list_threads_seeks_the_thread_index`.
+const LIST_THREADS_SQL: &str = "SELECT t.id,
+        m.from_name, m.from_addr, m.subject, m.snippet, t.last_date,
+        (NOT EXISTS (SELECT 1 FROM messages m3
+                     WHERE m3.thread_id = t.id AND m3.folder_id = ?1
+                       AND m3.is_read = 0)),
+        t.starred,
+        max(m.has_attachments), t.message_count, t.account_id
+ FROM threads t
+ JOIN messages m ON m.thread_id = t.id
+ WHERE m.folder_id = ?1
+   AND m.date = (SELECT max(m2.date) FROM messages m2
+                 WHERE m2.thread_id = t.id AND m2.folder_id = ?1)
+ GROUP BY t.id
+ ORDER BY t.last_date DESC
+ LIMIT ?2 OFFSET ?3";
+
 /// Threads visible in a folder, newest first, shaped by each thread's latest
 /// message in that folder.
 pub fn list_threads(
@@ -240,23 +259,7 @@ pub fn list_threads(
     offset: i64,
     limit: i64,
 ) -> rusqlite::Result<Vec<ThreadRow>> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT t.id,
-                m.from_name, m.from_addr, m.subject, m.snippet, t.last_date,
-                (NOT EXISTS (SELECT 1 FROM messages m3
-                             WHERE m3.thread_id = t.id AND m3.folder_id = ?1
-                               AND m3.is_read = 0)),
-                t.starred,
-                max(m.has_attachments), t.message_count, t.account_id
-         FROM threads t
-         JOIN messages m ON m.thread_id = t.id
-         WHERE m.folder_id = ?1
-           AND m.date = (SELECT max(m2.date) FROM messages m2
-                         WHERE m2.thread_id = t.id AND m2.folder_id = ?1)
-         GROUP BY t.id
-         ORDER BY t.last_date DESC
-         LIMIT ?2 OFFSET ?3",
-    )?;
+    let mut stmt = conn.prepare_cached(LIST_THREADS_SQL)?;
     let rows = stmt
         .query_map(params![folder_id, limit, offset], |r| {
             let from_name: Option<String> = r.get(1)?;
@@ -579,6 +582,30 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    /// The `m2` subquery runs once per message in the folder. Planned over the
+    /// folder index it walked the whole folder each time — quadratic, over a
+    /// minute for a 15k-message inbox. Checked on the bundled SQLite, which is
+    /// the planner that ships.
+    #[test]
+    fn list_threads_seeks_the_thread_index() {
+        let db = Db::open_in_memory().unwrap();
+        let plan: Vec<String> = db
+            .with(|conn| {
+                conn.prepare(&format!("EXPLAIN QUERY PLAN {LIST_THREADS_SQL}"))?
+                    .query_map(params![1, 100, 0], |r| r.get::<_, String>(3))?
+                    .collect()
+            })
+            .unwrap();
+        let m2 = plan
+            .iter()
+            .find(|step| step.contains(" m2 "))
+            .unwrap_or_else(|| panic!("no step for m2 in {plan:#?}"));
+        assert!(
+            m2.contains("idx_messages_thread_folder"),
+            "m2 must seek the thread index, got: {m2}"
+        );
     }
 
     #[test]
