@@ -117,9 +117,12 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .register_uri_scheme_protocol("skim-cid", |ctx, request| {
+        .register_asynchronous_uri_scheme_protocol("skim-cid", |ctx, request, responder| {
             // Serves cached inline (cid:) images to the message iframe:
             // http://skim-cid.localhost/<message_pk>/<url-encoded content id>
+            // Answered off the UI thread and from the reader connection: a
+            // synchronous lookup here would freeze the window for as long as
+            // a sync pass held the writer.
             let not_found = || {
                 tauri::http::Response::builder()
                     .status(404)
@@ -128,35 +131,39 @@ pub fn run() {
             };
             let path = request.uri().path().trim_start_matches('/').to_string();
             let Some((pk_str, cid_enc)) = path.split_once('/') else {
-                return not_found();
+                return responder.respond(not_found());
             };
             let Ok(message_pk) = pk_str.parse::<i64>() else {
-                return not_found();
+                return responder.respond(not_found());
             };
             let content_id = urlencoding_decode(cid_enc);
-            let state = ctx.app_handle().state::<AppState>();
-            let file = state
-                .db
-                .with(|conn| db::bodies::get_attachment_by_cid(conn, message_pk, &content_id))
-                .ok()
-                .flatten();
-            let Some(file) = file else { return not_found() };
-            let Some(path) = file.cache_path else {
-                return not_found();
-            };
-            match std::fs::read(&path) {
-                Ok(bytes) => tauri::http::Response::builder()
-                    .status(200)
-                    .header(
-                        "content-type",
-                        file.mime_type
-                            .as_deref()
-                            .unwrap_or("application/octet-stream"),
-                    )
-                    .body(bytes)
-                    .unwrap_or_else(|_| not_found()),
-                Err(_) => not_found(),
-            }
+            let app = ctx.app_handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let file = app
+                    .state::<AppState>()
+                    .db
+                    .read("cid_image", move |conn| {
+                        db::bodies::get_attachment_by_cid(conn, message_pk, &content_id)
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                let Some((path, mime)) = file.and_then(|f| Some((f.cache_path?, f.mime_type)))
+                else {
+                    return responder.respond(not_found());
+                };
+                responder.respond(match tokio::fs::read(&path).await {
+                    Ok(bytes) => tauri::http::Response::builder()
+                        .status(200)
+                        .header(
+                            "content-type",
+                            mime.as_deref().unwrap_or("application/octet-stream"),
+                        )
+                        .body(bytes)
+                        .unwrap_or_else(|_| not_found()),
+                    Err(_) => not_found(),
+                });
+            });
         })
         .on_window_event(|window, event| {
             match event {
