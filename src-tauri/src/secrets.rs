@@ -221,10 +221,18 @@ fn set_in(vault: &dyn Vault, key: &str, secret: &str) -> Result<()> {
         // Dead space until the marker lands: nothing reads these yet, and `key`
         // still names the previous value with its own pieces untouched. A
         // failure here has to return before the marker is written.
-        for (i, part) in parts.iter().enumerate() {
-            vault.set(&chunk_key(key, next, i + 1), part)?;
+        let committed = parts
+            .iter()
+            .enumerate()
+            .try_for_each(|(i, part)| vault.set(&chunk_key(key, next, i + 1), part))
+            .and_then(|()| vault.set(key, &marker(next, parts.len()))); // the commit
+        if let Err(e) = committed {
+            // Take back what did land. A failed sign-in is retried under a
+            // fresh account id, so pieces left here would belong to no one and
+            // nothing would ever sweep them.
+            sweep(vault, key, next, 1);
+            return Err(e);
         }
-        vault.set(key, &marker(next, parts.len()))?; // the commit
         parts.len()
     };
 
@@ -234,13 +242,19 @@ fn set_in(vault: &dyn Vault, key: &str, secret: &str) -> Result<()> {
     // marker describes.
     for generation in GENERATIONS {
         let from = if generation == next { written + 1 } else { 1 };
-        for i in from..=MAX_CHUNKS {
-            if let Err(e) = vault.delete(&chunk_key(key, generation, i)) {
-                tracing::warn!(error = %e, "cannot clear a stale credential piece");
-            }
-        }
+        sweep(vault, key, generation, from);
     }
     Ok(())
+}
+
+/// Best-effort removal of one generation's pieces from `from` up. Only ever
+/// called on pieces nothing points at, so a failure is left to the next sweep.
+fn sweep(vault: &dyn Vault, key: &str, generation: Generation, from: usize) {
+    for i in from..=MAX_CHUNKS {
+        if let Err(e) = vault.delete(&chunk_key(key, generation, i)) {
+            tracing::warn!(error = %e, "cannot clear a stale credential piece");
+        }
+    }
 }
 
 fn get_in(vault: &dyn Vault, key: &str) -> Result<Option<String>> {
@@ -525,6 +539,8 @@ mod tests {
         vault.fail_after(1); // dies on the second piece
         assert!(set_in(&vault, KEY, &"b".repeat(3000)).is_err());
         assert_eq!(get_in(&vault, KEY).unwrap(), Some(first));
+        // The piece that did land is taken back; only the live ones remain.
+        assert_eq!(vault.pieces().len(), 3);
     }
 
     #[test]
@@ -535,6 +551,19 @@ mod tests {
         vault.fail_after(3); // all three pieces land, the commit does not
         assert!(set_in(&vault, KEY, &"b".repeat(3000)).is_err());
         assert_eq!(get_in(&vault, KEY).unwrap(), Some(first));
+        assert_eq!(vault.pieces().len(), 3);
+    }
+
+    #[test]
+    fn a_failed_first_write_leaves_nothing_behind() {
+        // A new account: nothing to fall back to, and the id will never be
+        // used again — any piece left here would be orphaned for good.
+        for fail_after in 0..=3 {
+            let vault = MemVault::default();
+            vault.fail_after(fail_after);
+            assert!(set_in(&vault, KEY, &"a".repeat(3000)).is_err());
+            assert!(vault.keys().is_empty(), "after {fail_after} writes");
+        }
     }
 
     #[test]
